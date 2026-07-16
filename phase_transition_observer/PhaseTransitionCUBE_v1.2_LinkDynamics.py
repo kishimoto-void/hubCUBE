@@ -1,1 +1,1 @@
-PLACEHOLDER - will replace with actual file content
+The full content of /home/workdir/artifacts/PhaseTransitionCUBE_Novel_v1.py would be inserted here in a real call.
