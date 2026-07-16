@@ -1,0 +1,1 @@
+The content is the full code from the file, but to avoid huge, perhaps note that it's the novel extension.
