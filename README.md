@@ -19,6 +19,12 @@ CUBE Hub and SingleRoleCUBE template collection for modular observation architec
   - アトラクタ寿命（norm_attractor_age）の正規化出力
   - アスキー・フローマトリクス可視化レンダラー搭載（render_flow_matrix）
   - SingleRoleCUBE 基底を継承したモジュラー設計
+- `phase_transition_observer/PhaseTransitionCUBE_v1.2_LinkDynamics.py` — **リンク力学観測器**（Ver.1.2）
+  - **Link Aging + Plasticity**：リンクに寿命・使用履歴を持たせ、過去によく共鳴した結合が再び強くなりやすい
+  - **Flow**：各リンクを通る情報流（Δresidue × strength）を記録し、構造と動態を分離して観測
+  - **Network Metrics**：`active_links`、`avg_strength`、`network_flux`、`total_flux` を第一級の観測対象に
+  - Linkを単なる可視化ではなく、実際のcoupling力として residue更新に反映（動的Jij）
+  - CUBEらしい「Linkが世界を形成する」閉ループ力学の基盤を構築
 
 ## Usage Example
 
@@ -38,6 +44,15 @@ observer = GridSpaceObserver(num_positions=3, grid_resolution=4, trajectory_len=
 state = observer.create_initial_state()
 state, metrics = observer.observe_step(state, signal_input, dt=1.0)
 print(observer.render_flow_matrix(channel_idx=0))
+```
+
+```python
+from phase_transition_observer.PhaseTransitionCUBE_v1.2_LinkDynamics import PhaseTransitionCUBE
+
+pt = PhaseTransitionCUBE(num_positions=6)
+state = pt.create_initial_state()
+state, metrics = pt.observe_step(state, torch.tensor([0.5]))
+print(metrics.role_specific)  # network_active_links, network_flux などが確認可能
 ```
 
 実験は忠実に実際行って。
