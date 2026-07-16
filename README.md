@@ -5,6 +5,13 @@ CUBE Hub and SingleRoleCUBE template collection for modular observation architec
 ## Modules
 
 - `hubCUBE_SingleRole_Template*.py` — SingleRoleCUBE のテンプレート（状態・役割分化・観測の最小構成）
+  - `hubCUBE_SingleRole_Template_v2.2_ImprovedCarry.py` **NEW** — **residue carryメカニズムを大幅改良**
+    - Adaptive Decay（coherence/entropy状態依存の保持率制御）
+    - Momentum Carry（residue velocityの慣性項で滑らかなattractor形成）
+    - Geometry Modulation（局所活性に基づくdelta強調）
+    - Soft Clamp（tanhベースの滑らかな境界処理）
+    - 新メトリクス: `carry_persistence`, `residue_velocity` で定量観測可能
+    - 実験により静寂期のresidue持続性向上とダイナミクスの安定化を確認済み
 - `CUBE_Anomaly_Detection_v*.py` — 異常検知・ロバスト化の実験モジュール群
 - `phase_shift_observer/PhaseShiftObserverCUBE_v4_3.py` — **位相ズレ・同期トポロジー観測器**（Ver.4.3）
   - 高階時間力学（drift / acceleration / jerk）
@@ -26,33 +33,21 @@ CUBE Hub and SingleRoleCUBE template collection for modular observation architec
   - Linkを単なる可視化ではなく、実際のcoupling力として residue更新に反映（動的Jij）
   - CUBEらしい「Linkが世界を形成する」閉ループ力学の基盤を構築
 
-## Usage Example
+## Usage Example (Improved Carry v2.2)
 
 ```python
-from phase_shift_observer.PhaseShiftObserverCUBE_v4_3 import PhaseShiftObserverCUBE, PhaseCubeConfig
+from hubCUBE_SingleRole_Template_v2.2_ImprovedCarry import SingleRoleCUBE, CUBEHub, ResidueObserverCUBE
 import torch
 
-obs = PhaseShiftObserverCUBE(PhaseCubeConfig(num_positions=5))
-state, metrics = obs.step(torch.tensor([0.2]), external_phases=some_node_phases)
-print(metrics)
-```
+hub = CUBEHub("CarryTestHub")
+res_cube = ResidueObserverCUBE(carry_momentum=0.25, adaptive_strength=0.30)
+hub.register(res_cube)
 
-```python
-from grid_space_observer.GridSpaceObserver_v4_2 import GridSpaceObserver
-
-observer = GridSpaceObserver(num_positions=3, grid_resolution=4, trajectory_len=16)
-state = observer.create_initial_state()
-state, metrics = observer.observe_step(state, signal_input, dt=1.0)
-print(observer.render_flow_matrix(channel_idx=0))
-```
-
-```python
-from phase_transition_observer.PhaseTransitionCUBE_v1.2_LinkDynamics import PhaseTransitionCUBE
-
-pt = PhaseTransitionCUBE(num_positions=6)
-state = pt.create_initial_state()
-state, metrics = pt.observe_step(state, torch.tensor([0.5]))
-print(metrics.role_specific)  # network_active_links, network_flux などが確認可能
+for i in range(8):
+    x = torch.tensor([0.7 + 0.3 * (i % 3 - 1)])
+    results = hub.observe_all(x)
+    m = results["ResidueObserver"]
+    print(f"Step {i+1}: res={m.residue_norm:.4f} carry_pers={m.carry_persistence:.3f} vel={m.residue_velocity:.4f}")
 ```
 
 実験は忠実に実際行って。
