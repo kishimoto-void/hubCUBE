@@ -103,10 +103,31 @@ class SingleRoleCUBE:
         return [(int(idx[0,i]), int(idx[1,i]), round(float(strengths[mask][i]),3))
                 for i in range(mask.sum())][:4]
 
+    # ============================================================
+    # Force Composition Layer（ここを拡張していく）
+    # ============================================================
+    def _compute_additional_forces(self, state: BaseCUBEState, delta: torch.Tensor) -> torch.Tensor:
+        """
+        将来的に独立した Force モジュール（MomentumForce, GeometryForce など）を
+        ここで合成する予定のプレースホルダー。
+
+        現在は delta を暫定的な追加力として扱っているが、
+        本来は以下のように独立モジュールから力を取得する形を目指す：
+
+            momentum_f = self.momentum_force.compute(state)
+            geometry_f = self.geometry_force.compute(state)
+            return momentum_f + geometry_f
+        """
+        # 暫定実装: delta を「外部入力由来の力」として扱う
+        # 将来的にはこの行を削除し、独立した Force クラスに置き換える
+        return delta * 0.8
+
     def _compute_forces(self, state: BaseCUBEState, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, float]:
         """
-        Force 合成層（ここで複数の Force を組み合わせる）
-        現在は CarryForce のみ。将来的に GeometryForce, MomentumForce などを追加。
+        Force 合成の中心メソッド
+        - CarryForce から基本の運搬力を取得
+        - 追加の Force を _compute_additional_forces で合成
+        - 将来的にここが本格的な Dynamics Solver の一部になる
         """
         val = float(x.mean()) if x.numel() > 1 else float(x)
         proj = torch.zeros(self.num_positions)
@@ -118,20 +139,18 @@ class SingleRoleCUBE:
         new_axis = state.axis * 0.55 + proj * 0.45
         delta = new_axis - state.axis
 
-        # CarryForce から力を取得
+        # 1. CarryForce から力を取得（原則：力だけを返す）
         carry_f = self.carry_force.compute_force(
             state.residue,
             persistence=self.carry_force.default_persistence
         )
 
-        # 将来的に他の Force をここで合成
-        # geometry_f = geometry_force.compute(...)
-        # momentum_f = momentum_force.compute(...)
-        other_forces = delta * 0.8   # 暫定的に delta を other force として扱う
+        # 2. その他の Force を合成（将来的に独立モジュール化）
+        additional_forces = self._compute_additional_forces(state, delta)
 
-        total_force = carry_f + other_forces
+        total_force = carry_f + additional_forces
 
-        # 簡易 persistence 計算（Solver 的に new を仮定して評価）
+        # 簡易 persistence 計算（Solver 的に tentative new を仮定）
         tentative_new = torch.clamp(total_force, -self.residue_cap, self.residue_cap)
         persistence = self.carry_force.compute_persistence(state.residue, tentative_new)
 
@@ -142,7 +161,7 @@ class SingleRoleCUBE:
 
         new_res = torch.clamp(total_force, -self.residue_cap, self.residue_cap)
 
-        # Tension は Force の結果から簡易計算
+        # Tension は Force の結果から簡易計算（将来的には別モジュールへ）
         new_ten = (new_res - state.residue).abs() * 0.6 + state.tension * 0.4
 
         res_m = float(new_res.abs().mean())
