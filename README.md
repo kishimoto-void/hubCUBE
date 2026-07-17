@@ -2,58 +2,88 @@
 
 CUBE Hub and SingleRoleCUBE template collection for modular observation architecture
 
-## 設計思想 (v3.0+)
+## 設計哲学（v4+ 物理シミュレーションフレームワーク）
 
-**Carryの責務を厳格に最小化**
+**最大の改善点**
 
-Carryは「過去を次へ運ぶ」だけを担当します。
+- 「更新するクラス」をなくす
+- **Force Generator**（力を返すモジュール）と **Constraint**（拘束を返すモジュール）に徹底分解
+- 状態更新は **Dynamics Solver** のみが担当
+
+これにより、Bubble・Repair・Waypoint・Phase・LLM までを同じ力学フレームワーク上で自然に扱えるようになります。
+
+### 推奨アーキテクチャ
 
 ```
-R(t+1) = decay * R(t) + Δ
+Reality
+   ↓
+Sensors (Raw Observation)
+   ↓
+Observation / Interpreter
+   ↓
+PhaseState
+   (position, velocity, energy, residue, confidence, entropy ...)
+   ↓
+Force Modules          Constraint Modules
+   CarryForce           GeometryConstraint
+   BubbleForce          BoundaryConstraint
+   RepairForce          TopologyConstraint
+   NoiseForce           ...
+   GravityForce
+   ↓
+Dynamics Solver  (唯一状態を更新する場所)
+   ↓
+New PhaseState
+   ↓
+Evaluator / PhasePacket
+   ↓
+LLM / Action
 ```
 
-Adaptive Decay / Geometry / Momentum / Boundary / Anomaly / Links は
-すべて外側の **Field** または **Observation** レイヤーに分離します。
+### Force vs Constraint の区別
 
-これにより将来、BubbleForce・Repair・Waypoint・PhaseGraph などを
-「力の項」としてベクトル合成しやすくなります。
+- **Force**（力を生成）: Carry, Bubble, Repair, Momentum, Noise, Gravity など
+  → 「状態をどの方向に動かすか」を返す
+- **Constraint**（拘束）: Geometry, Boundary, Topology など
+  → 「状態をどの範囲に収めるか」を返す
 
-R' = CarryField + GeometryField + MomentumField + BoundaryField + ExternalInput
+### Carryの現在形（v4）
+
+Carryは完全に **Force Generator** になりました。
+
+- `compute_force(old_residue, persistence)` → carry_force のみを返す
+- 状態更新は一切しない
+- Dynamics Solver が他のForceと合成して新状態を計算
+
+Residueは「状態」ではなく、PhaseStateの一部分として扱う方が自然です。
 
 ## Modules
 
-- `CarryField_v3_Minimal.py` **NEW (v3)** — **最小CarryField**
-  - 責務: propagate(old_residue, delta) のみ
-  - effective_decay / boundary_fn / extra_terms を外部から注入
-  - compute_persistence: cosine similarity で「どれだけ情報が残ったか」を正しく測定
-  - velocity / anomaly / links を一切知らない純粋な運び屋
-- `hubCUBE_SingleRole_Template_v2.2_ImprovedCarry.py` — v2.2（参考用、carryがやや肥大化していた版）
-- `hubCUBE_SingleRole_Template.py` / v2.1 — 基本テンプレート
-- `CUBE_Anomaly_Detection_v*.py` — 異常検知実験群
-- `phase_shift_observer/PhaseShiftObserverCUBE_v4_3.py` — 位相ズレ観測器
-- `grid_space_observer/GridSpaceObserver_v4_2.py` — 時空間幾何観測器
-- `phase_transition_observer/PhaseTransitionCUBE_v1.2_LinkDynamics.py` — リンク力学観測器
+- `CarryForce_v4.py` — Pure Carry Force Generator（力を返すだけ）
+- `SimpleDynamicsSolver_example.py` — Force合成と状態更新の分離を示す例
+- `CarryField_v3_Minimal.py` — v3版の参考用（現在は v4 推奨）
+- `hubCUBE_SingleRole_Template*.py` — SingleRoleCUBEテンプレート
+- `phase_shift_observer/` `grid_space_observer/` `phase_transition_observer/` — 各種観測モジュール
 
-## Usage Example (CarryField v3)
+## Usage (CarryForce v4 + Solver pattern)
 
 ```python
-from CarryField_v3_Minimal import CarryField
+from CarryForce_v4 import CarryForce
 import torch
 
-carry = CarryField(default_decay=0.87)
-old_res = torch.randn(6)
-delta = torch.randn(6) * 0.3
+carry = CarryForce(default_persistence=0.87)
+old_res = torch.randn(6) * 0.5
 
-# Fieldからeffective_decayを与える例
-new_res = carry.propagate(
-    old_res, delta,
-    effective_decay=0.92,           # AdaptiveDecayFieldから
-    # boundary_fn=some_boundary.limit,
-    # extra_terms=momentum_term     # MomentumFieldから
-)
+carry_force = carry.compute_force(old_res, persistence=0.90)
 
-persistence = carry.compute_persistence(old_res, new_res)
-print(f"Persistence: {persistence:.4f}")
+# 他のForceを合成する例
+other_forces = torch.randn(6) * 0.12   # GeometryForceやMomentumForceの代わり
+
+new_res = carry_force + other_forces
+new_res = torch.clamp(new_res, -3.0, 3.0)  # BoundaryConstraint代行
+
+pers = carry.compute_persistence(old_res, new_res)
+print(f"Persistence: {pers:.4f}")
 ```
 
-実験は忠実に実際行って。
+実験は忠実に実際行って、設計は物理シミュレーションとして清晰に。
