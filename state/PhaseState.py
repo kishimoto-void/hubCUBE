@@ -13,11 +13,10 @@ class PhysicsField:
     """
     [物理状態フィールド]
     連続空間における力学ベクトル群。
-    将来的に orientation, angular_velocity, mass などの拡張スロットを受け入れる。
     """
-    position: np.ndarray      # 3次元座標 [x, y, z]
-    velocity: np.ndarray      # 3次元速度ベクトル [vx, vy, vz]
-    acceleration: np.ndarray = field(default_factory=lambda: np.zeros(3))  # 3次元加速度 [ax, ay, az]
+    position: np.ndarray
+    velocity: np.ndarray
+    acceleration: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
     def __post_init__(self):
         self.position = np.asarray(self.position, dtype=np.float64)
@@ -25,7 +24,6 @@ class PhysicsField:
         self.acceleration = np.asarray(self.acceleration, dtype=np.float64)
 
     def validate(self) -> Tuple[bool, str]:
-        """ 物理ベクトルの健全性を検証する """
         for name, arr in [("position", self.position), ("velocity", self.velocity), ("acceleration", self.acceleration)]:
             if arr.shape != (3,):
                 return False, f"PhysicsField.{name} must have shape (3,), got {arr.shape}"
@@ -38,13 +36,9 @@ class PhysicsField:
 
 @dataclass
 class Carry:
-    """
-    [慫性情報フィールド]
-    シミュレーションのステップ間を「持ち運ぶ（Carry）」ための一時特性。
-    """
-    last_delta: np.ndarray = field(default_factory=lambda: np.zeros(3))  # 前回ステップの確定移動変位
-    momentum: np.ndarray = field(default_factory=lambda: np.zeros(3))    # 積積された慫性・モーメンタム
-    payload: Dict[str, Any] = field(default_factory=dict)               # 記憶ではなく「持ち運ぶペイロード」
+    last_delta: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    momentum: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    payload: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         self.last_delta = np.asarray(self.last_delta, dtype=np.float64)
@@ -64,30 +58,54 @@ class Carry:
 @dataclass
 class Metrics:
     """
-    [派生キャッシュ・フィールド]
-    ※重要: このクラス内の全プロパティは状態そのものではなく、
-    PhysicsField等から計算される『派生値（キャッシュ）』です。
-    EvaluationやObserver、可視化層がO(1)で高速アクセスするために保持されます。
+    派生メトリクス（純結に計算・再計算される値）
 
-    update_derived_cache() は Solver / ConstraintPipeline 適用後に呼び出すこと。
-    energy, stability, residue_norm などの更新責任は Evaluation層による。
+    重要:
+    - これらは状態そのものではなく、観測・計算される派生値である
+    - recompute()を使って純結に再計算することを推奨
     """
-    energy: float = 100.0        # システムが活動可能な残りエネルギー
-    entropy: float = 0.0         # 乱雑度・カオス指数
-    stability: float = 1.0       # 挙動の安定度指標 (1.0: 安定, 0.0: 発散/崩壊)
-    oscillation: float = 0.0     # 軌道の往復振動強度
-    residue_norm: float = 0.0    # 積分・制約補正時の差分残差L2ノルム
-    velocity_norm: float = 0.0   # 速度のL2絶対値（キャッシュ）
+    energy: float = 100.0
+    entropy: float = 0.0
+    stability: float = 1.0
+    oscillation: float = 0.0
+    residue_norm: float = 0.0
+    velocity_norm: float = 0.0
 
-    def update_derived_cache(self, field_state: PhysicsField, *, residue_norm: Optional[float] = None):
-        """
-        PhysicsFieldの状態からキャッシュとなる統計量を同期更新する。
-
-        Solverまたは ConstraintPipeline 適用後に呼び出すことを推奨。
-        """
+    def update_derived_cache(self, field_state: PhysicsField):
+        """ パフォーマンス上のキャッシュ更新（少ない項目のみ） """
         self.velocity_norm = float(np.linalg.norm(field_state.velocity))
+
+    def recompute(
+        self,
+        field: PhysicsField,
+        violations: Optional[list] = None,
+        residue_norm: Optional[float] = None
+    ):
+        """
+        派生メトリクスを純結に再計算する。
+
+        これが Evaluation の主な入力インターフェースになる予定。
+        """
+        # velocity_norm
+        self.velocity_norm = float(np.linalg.norm(field.velocity))
+
+        # residue_norm
         if residue_norm is not None:
             self.residue_norm = float(residue_norm)
+        elif violations:
+            self.residue_norm = float(len(violations)) * 0.8
+        else:
+            self.residue_norm = 0.0
+
+        # stability: 純結な派生計算
+        v = self.velocity_norm
+        r = self.residue_norm
+        v_count = len(violations) if violations else 0
+        self.stability = max(0.0, min(1.0, 1.0 / (1.0 + v * 0.04 + r * 0.12 + v_count * 0.25)))
+
+        # entropy / oscillation は現在はダミー（後続で拡張）
+        # self.entropy = ...
+        # self.oscillation = ...
 
     def validate(self) -> Tuple[bool, str]:
         if self.energy < 0.0:
@@ -106,7 +124,6 @@ class Metrics:
 
 @dataclass
 class HistoryRecord:
-    """[履歴レコード] 評価層（Evaluation）に渡す不変のタイムシークエンスログ"""
     step: int
     time: float
     position: np.ndarray
@@ -116,7 +133,6 @@ class HistoryRecord:
 
 @dataclass
 class History:
-    """[履歴管理バッファ] 大規模シミュレーションのメモリ最適化用コンテナ"""
     records: List[HistoryRecord] = field(default_factory=list)
     max_len: int = 1000
 
@@ -136,10 +152,9 @@ class History:
 
 @dataclass
 class Metadata:
-    """[制御・同期用メタデータ]"""
     step: int = 0
     time: float = 0.0
-    status: str = "stable"       # "stable", "violated", "critical", "halted"
+    status: str = "stable"
     custom_tags: List[str] = field(default_factory=list)
     attributes: Dict[str, Any] = field(default_factory=dict)
 
@@ -153,26 +168,16 @@ class Metadata:
 
 @dataclass
 class PhaseState:
-    """
-    [hubCUBE 共通コア状態モデル]
-    システム内のあらゆる状態（物理、慫性、特性、メタ）を1つに集約する唯一の状態構造。
-    各サブレイヤーが不要な情報に一切依存しない極限のデカップリングを実現。
-    """
     field: PhysicsField
     carry: Carry = field(default_factory=Carry)
     metrics: Metrics = field(default_factory=Metrics)
     metadata: Metadata = field(default_factory=Metadata)
-    # 大量エージェント実行時の超軽量化のため、Historyは完全Optional化
     history: Optional[History] = None
 
     def __post_init__(self):
         self.metrics.update_derived_cache(self.field)
 
     def validate(self) -> Tuple[bool, str]:
-        """
-        [改善点①: シミュレーションの品質アサーション]
-        Solver積分後や各ステップ終了時に「数値崩壊（NaN/Inf/不正形状/負値）」を検関する。
-        """
         for section, validator in [
             ("field", self.field.validate),
             ("carry", self.carry.validate),
@@ -185,11 +190,6 @@ class PhaseState:
         return True, "OK"
 
     def to_constraint_input(self) -> "ConstraintInput":
-        """
-        ConstraintPipelineで使用する ConstraintInput への変換。
-        constraints/ レイヤーとの結合を滑らかにするためのブリッジメソッド。
-        """
-        # 循環インポート回避のために後方インポート
         from constraints.ConstraintCore import ConstraintInput
         return ConstraintInput(
             position=self.field.position.copy(),
@@ -199,7 +199,6 @@ class PhaseState:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        """DB保存やファイル永続化用の完全なシリアライズデータ"""
         data = {
             "field": {
                 "position": self.field.position.tolist(),
@@ -240,10 +239,6 @@ class PhaseState:
         return data
 
     def to_packet(self) -> Dict[str, Any]:
-        """
-        [改善点④: LLM(Packet)・軽量パケット通信用のサブセット出力]
-        LLMのコンテキストウィンドウを汚さず、要点だけを渡すための超軽量セグメント。
-        """
         return {
             "id": self.metadata.attributes.get("agent_id", "hubcube_node"),
             "step": self.metadata.step,
@@ -256,7 +251,6 @@ class PhaseState:
         }
 
     def clone(self) -> "PhaseState":
-        """NumPy配列およびメタ情報のディープコピーを最速で生成する複製機構"""
         cloned_history = None
         if self.history is not None:
             cloned_history = History(
