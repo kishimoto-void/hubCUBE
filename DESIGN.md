@@ -42,17 +42,27 @@ PhaseState の例:
 - Dynamics Solver で合成
 するだけで済む。
 
-## ファイル構成（推奨）
+## ファイル構成（2026-07-17 整理後）
 
-- `CarryForce_v4.py` : 純粋な Carry Force Generator
-- `SimpleDynamicsSolver_example.py` : Force合成の最小例
-- `hubCUBE_SingleRole_Template_v4_ForceBased.py` : CarryForce を実際に使ったテンプレート（最新推奨）
-- `DESIGN.md` : 本ドキュメント
-- 各種 observer（phase_shift, grid_space など）は Observation / Interpreter 層として位置づけ
+**Core (最新推奨)**
+- `forces/CarryForce_v4.py` : 純粋な Carry Force Generator
+- `templates/hubCUBE_SingleRole_Template_v4_ForceBased.py` : CarryForce を実際に使ったテンプレート（最新推奨）
 
-## 過去バージョン
+**Examples & Experiments**
+- `experiments/SimpleDynamicsSolver_example.py` : Force合成の最小例
+- `experiments/CUBE_Anomaly_Detection_v*.py` : Anomaly検出実験群（v2.6〜2.8）
+- `experiments/CarryField_v3_Minimal.py` など過去バージョン（参考用）
 
-- v2.2_ImprovedCarry : Carry が Dynamics 化していた版（参考）
-- v3_CarryField : propagate で状態を返していた版（参考）
+**Documentation**
+- `DESIGN.md`, `ARCHITECTURE.md`, `REORGANIZATION_LOG.md`
+- `docs/` : constraints, dynamics, forces 関連の補足
+
+**Observers** (当面ルート)
+- `phase_shift_observer/`, `grid_space_observer/`, `phase_transition_observer/`
+
+**過去バージョン（experiments/ に移動済み）**
+- v2.2_ImprovedCarry, v3_CarryField など : 参考として experiments/ にアーカイブ
+
+**Note**: 2026-07-17 にルートクリーンアップを実施。詳細は REORGANIZATION_LOG.md を参照。
 
 実験は忠実に実際行って。
