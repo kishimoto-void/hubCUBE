@@ -1,130 +1,192 @@
-# hubCUBE 開発・実験ロードマップ
+# hubCUBE 開発・実験ロードマップ（改訂版）
 
-**作成日**: 2026-07-17
-**目的**: ARCHITECTURE.md / DESIGN.md で示された理想構造を実現するための、具体的なコード実験項目と優先順位を明確にする。
+**作成日**: 2026-07-17（初版） / **改訂**: 2026-07-17
+**作成の背景**: ARCHITECTURE.md / DESIGN.md の設計思想を最も忠実に体現する方向で、役割分離を徹底したロードマップに再構成。
 
-> 「実験は忠実に実際行って」
+> 「力学をモジュール化する」ことが hubCUBE の最大の強み。
+> Forceは「こう動きたい」しか返さない。
+> Constraintは「ここまでしか動けない」しか返さない。
+> **DynamicsSolverだけが状態を書き換える**。
+
+この原則を最後まで崩さないことが、hubCUBEの価値を最大化する。
 
 ---
 
-## 現在の状況（2026-07-17 整理後）
+## 現在の状況（2026-07-17時点）
 
-### 完了・安定している部分
-- `forces/CarryForce_v4.py`：純粋なForce Generatorとして良好
-- `templates/hubCUBE_SingleRole_Template_v4_ForceBased.py`：CarryForceをcomposeした最新テンプレート
-- `experiments/SimpleDynamicsSolver_example.py`：最小Solverの考え方を示す
+### 完了している基盤
+- `forces/CarryForce_v4.py`：純粋Force Generatorとして良好
+- `templates/hubCUBE_SingleRole_Template_v4_ForceBased.py`：最新テンプレート
 - ディレクトリ構造の基盤（forces/, templates/, experiments/）
 
-### まだルートに残っているレガシー
-- CUBE_Anomaly_Detection_v2.6〜2.8
-- 旧SingleRole Template群（v2.1, v2.2 など）
-
-### 大きなギャップ（Missing Pieces）
-- **Constraints** 層が全く存在しない
-- **Dynamics Solver** が本格的に実装されていない（Template内で簡易的に状態更新している）
-- **追加のForce**（Bubble, Repair, Momentum, Noise など）が未実装
-- **PhasePacket**（LLMとの構造化インターフェース）が未定義
-- **Repair / Recovery** メカニズムが弱い
-- **Evaluation層** が未整備
-- Observers（grid_space, phase_shift など）が architecture のどの層に位置づくか未整理
+### 大きなギャップ
+- DynamicsSolver が独立していない（Template内で状態更新を担っている）
+- Constraint層が完全に欠如
+- PhaseState の抽象度がまだ低い
+- PhasePacket が未定義
+- Evaluation（定量評価ループ）が弱い
+- Forceの種類が CarryForce のみ
 
 ---
 
-## 優先順位付きロードマップ
+## 改訂版ロードマップの全体像
 
-### Phase 1: 基盤強化（即時〜1週間以内推奨）
-**目標**: 「Force + Constraint + Solver」の最小ループを成立させる
+### Phase 1（最優先・心臓部確立）
+**目標**: 「State → Forces → Constraints → DynamicsSolver → Next State」の流れを成立させる
 
-| 優先 | 実験項目 | 提案ファイル | 内容・目的 | 難易度 |
-|------|----------|--------------|------------|--------|
-| 1 | GeometryConstraint / BoundaryConstraint | `constraints/GeometryConstraint.py` | 幾何的制約と境界制約の最小実装。状態を直接更新せず、許容範囲を返す | 中 |
-| 2 | 最小 DynamicsSolver | `dynamics/MinimalDynamicsSolver.py` | CarryForce + Constraint を受け取り、新PhaseStateを返す唯一の更新担当 | 中 |
-| 3 | PhasePacket 定義 | `packet/PhasePacket.py` | LLMが受け取る構造化データ（local state summary + metrics + suggestions） | 低 |
-| 4 | 簡易 RepairForce 実験 | `forces/RepairForce_v1.py` | residueの欠損・異常を検知して修復方向の力を生成する実験 | 中 |
+#### ① DynamicsSolverの独立（最重要）
+**提案ファイル**: `dynamics/MinimalDynamicsSolver.py`
 
-**推奨実験の進め方**:
-1. `constraints/` ディレクトリ作成
-2. `MinimalDynamicsSolver` で Template v4 をリファクタ（状態更新をSolverに移譲）
-3. 小さな統合実験スクリプトを `experiments/force_constraint_integration.py` に作成
+設計原則:
+- **Solverだけが状態を更新する**
+- Forceは「力ベクトル」のみ返す
+- Constraintは「制約」のみ返す
+- これらを合成して新PhaseStateを生成する唯一の場所
 
-### Phase 2: Forceの拡充とObserver統合（1〜3週間）
+これがhubCUBEの心臓部になる。
 
-| 優先 | 実験項目 | 提案ファイル | 内容・目的 | 難易度 |
-|------|----------|--------------|------------|--------|
-| 1 | BubbleForce | `forces/BubbleForce.py` | 非平衡感情・張力の局所的「泡」生成と伝播実験 | 中〜高 |
-| 2 | MomentumForce | `forces/MomentumForce.py` | 慣性・運動量を考慮した力の生成 | 低〜中 |
-| 3 | Observer統合 | `observers/` ディレクトリ + `__init__.py` | 既存の grid_space_observer / phase_shift_observer を architecture の Observation層に位置づけ | 中 |
-| 4 | 複数Role間相互作用実験 | `experiments/multi_role_hub_test.py` | CUBEHubで複数のSingleRoleCUBEを登録し、相互のresidue影響を観測 | 中 |
+#### ② Constraint層の最小実装
+**提案ディレクトリ**: `constraints/`
 
-### Phase 3: 評価・修復・長期記憶（中長期）
+最低限必要な2つ:
+- `BoundaryConstraint.py`（境界制約）
+- `GeometryConstraint.py`（幾何制約）
 
-- Evaluation層の実装（リスク・重要度・修復優先度の定量化）
-- Residueの長期持続・減衰パターンの系統的実験
-- Repairメカニズムの本格化（欠損復元、phase bias修正）
-- Phase Stateのよりリッチな表現（velocity, energy, waypoint など）
-- 他のプロジェクト（VGE, wCUBE, EmotionalVoidCore）との接続実験
+TopologyConstraintはPhase 2以降でOK。
+
+#### ③ PhaseStateの抽象度向上
+**提案ファイル**: `state/PhaseState.py`（または `dataclasses` で定義）
+
+現在の `BaseCUBEState` より一段抽象度を上げる。
+
+推奨フィールド例:
+- `position`
+- `velocity`
+- `energy`
+- `residue`
+- `carry`（carry残量）
+- `history`（簡易時系列）
+- `waypoint`
+- `metadata`
+
+これにより、後のForceやEvaluationが扱いやすくなる。
+
+#### ④ Evaluationの早期導入（Phase 3から繰り上げ）
+**目的**: 実験の良し悪しを定量的に比較できるようにする
+
+最低限毎ステップで出すべきメトリクス:
+- `energy`
+- `residue_norm`
+- `entropy`
+- `stability`
+- `oscillation`
+
+これを `Evaluation` モジュール（または Solver 内で簡易計算）として実装。
+Phase 1の段階でこれがあると、後続の実験が非常にやりやすくなる。
+
+**Phase 1 の完了基準**:
+- DynamicsSolver が独立して動作する
+- Boundary + Geometry Constraint が機能する
+- PhaseState が richer になる
+- 基本的な定量評価ループが回る
 
 ---
 
-## 具体的なコード実験提案（すぐに始められるもの）
+### Phase 2（Force拡充とインターフェース整備）
 
-### 1. Force + Constraint 統合実験（最優先推奨）
-**ファイル**: `experiments/force_constraint_minimal_loop.py`
+#### Force Library の拡張
+CarryForce だけでは世界が狭い。独立した実験として以下を追加：
 
-目的:
-- CarryForce で力を生成
-- GeometryConstraint / BoundaryConstraint で制約を適用
-- MinimalDynamicsSolver で状態を更新
-- これを1ループで回して residue の挙動を定量観測
+- `forces/BubbleForce.py`
+- `forces/RepairForce.py`
+- `forces/MomentumForce.py`
+- `forces/NoiseForce.py`
+- `forces/GravityForce.py`
 
-### 2. PhasePacket プロトタイプ
-**ファイル**: `packet/PhasePacket.py` + `experiments/phase_packet_demo.py`
+それぞれ「このForceを入れたら世界はどう変わるか」を忠実に実験するフェーズ。
 
-内容:
-```python
-@dataclass
-class PhasePacket:
-    role_name: str
-    local_residue: torch.Tensor
-    metrics: dict
-    suggested_actions: list[str]
-    confidence: float
+#### PhasePacket の定義（非常に重要）
+**提案ファイル**: `packet/PhasePacket.py`
+
+設計思想:
+- LLMは **State を直接知らない**
+- LLMが見るのは **PhasePacket のみ**
+
+将来的な接続形:
 ```
-LLMはこのパケットだけを見て次の仮説を立てる、という最小形を実験。
+hubCUBE
+  ↓ (DynamicsSolver更新後)
+PhasePacket
+  ↓
+LLM（推論のみ担当）
+```
 
-### 3. Residue Repair 実験
-**ファイル**: `experiments/residue_repair_test.py`
+これによりAPI設計も非常にクリーンになる。
 
-- 意図的にresidueを欠損・ノイズ付与
-- RepairForce（または簡易修復ロジック）でどの程度回復するか定量評価
-- persistence や geometry fidelity との関係を測定
+#### Observer の将来像
+現在の「Observer → 結果」から、将来的には：
 
-### 4. Observer の Force 化実験
-既存の `phase_shift_observer` や `grid_space_observer` を、単なる観測ではなく「観測結果をForceとして出力する」形に変換する実験。
+```
+Observer
+  ↓
+ObservationForce（観測結果を力として出力）
+  ↓
+DynamicsSolver
+```
 
----
-
-## 長期ビジョン（hubCUBEが目指すもの）
-
-1. LLMはグローバル状態を持たない
-2. すべての状態遷移は Dynamics Solver を通じて物理的プロセスとして実現
-3. Force / Constraint / Evaluation が明確に分離され、個別に実験・改善可能
-4. 任意の推論エンジン（LLM以外も）が同じ PhasePacket インターフェースで接続可能
-5. residue / tension / phase のダイナミクスを定量的に研究できるプラットフォームになる
-
----
-
-## 次のアクション（おすすめ順）
-
-1. **即実行推奨**: `constraints/` 作成 + `MinimalDynamicsSolver` のプロトタイプ
-2. Phase 1 の4項目を1つずつ小さな実験として実装（各々1ファイルで完結する形）
-3. 既存のレガシーファイルを `experiments/legacy/` に移動してルートをさらにクリーンに
-4. ROADMAP.md を定期的に更新しながら進捗を記録
+「観測」も世界に影響を与える一つの力として扱う方向へ昇華させる。
 
 ---
 
-**このロードマップは「実験の地図」として機能します。**
+### Phase 3（高度化・長期研究）
 
-各項目は「完成させる」ためではなく、「忠実に実験して何が起きるかを観測する」ために存在します。
+- RepairForce の本格化と residue 修復実験
+- 長期シミュレーションでの residue / tension / phase の持続性研究
+- Evaluation の高度化（risk, priority, repair urgency など）
+- 複数Role Hub での力の相互作用実験
+- 他プロジェクト（VGE, wCUBE, EmotionalVoidCore）との接続
 
-何か優先して実験したい項目があれば、すぐにそのモジュールのスケッチや実験用スクリプトを作成します。
+---
+
+## 長期的なビジョン（hubCUBEが目指す姿）
+
+```
+State
+  ↓
+Force Library（Carry, Bubble, Repair, Momentum...）
+  ↓
+Constraint Library（Boundary, Geometry, Topology...）
+  ↓
+DynamicsSolver（唯一の状態更新担当）
+  ↓
+PhasePacket
+  ↓
+LLM（推論のみ）
+```
+
+hubCUBE は「状態遷移そのもの」を担う**力学ミドルウェア**へと進化する可能性がある。
+LLMは推論に専念し、hubCUBEが物理的・力学的な整合性を保証する。
+
+この方向性は、ARCHITECTURE.md・DESIGN.md と完全に一貫しており、
+「役割の分離」を最後まで徹底したときに最も美しい形になる。
+
+---
+
+## 次の具体的なアクション（おすすめ順）
+
+1. **最優先**: `dynamics/MinimalDynamicsSolver.py` のプロトタイプ作成
+2. `constraints/` ディレクトリ作成 + BoundaryConstraint / GeometryConstraint の最小実装
+3. `state/PhaseState.py` の richer 版定義
+4. 基本 Evaluation メトリクスを Solver または別モジュールで出力できるようにする
+5. PhasePacket のプロトタイプ
+
+各ステップを「小さく・忠実に実験」しながら進めることを推奨します。
+
+---
+
+**このロードマップは「役割分離の設計思想」を軸に再構成しました。**
+
+ご指摘いただいた点を最大限反映しています。
+もしこの方向で問題なければ、Phase 1 の最初のモジュール（DynamicsSolver または Constraint）から実際にコードを書き始めます。
+
+何かさらに調整したい点があれば遠慮なくお知らせください。
