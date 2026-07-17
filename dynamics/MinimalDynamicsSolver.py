@@ -1,28 +1,57 @@
 #!/usr/bin/env python3
 """
-MinimalDynamicsSolver v1 - hubCUBEの心臓部
+MinimalDynamicsSolver v4 - hubCUBEの心臓部（責務境界準拠版）
 
-設計原則（最優先で守る）:
-- Solverだけが状態を更新する
-- Forceは「力ベクトル」のみ返す（状態更新をしない）
-- Constraintは「制約」のみ返す（状態更新をしない）
-- これらを合成して新PhaseStateを生成する唯一の場所
+このバージョンは docs/architecture/Core_Component_Responsibility_Boundaries.md
+で定義された原則に基づいて再設計されている。
 
-Phase 1 の最初の本格実装として、CarryForce と最小Constraintを
-受け取って次の状態を計算する最小形を提供する。
+設計原則（厳守）:
+- Solverは状態遷移の「実行（Integrator）」に徹する
+- Solverは特定の状態フィールド（residueなど）の意味を知らない
+- Forceは「どの対象に、どれだけの変化を望むか」をForceVectorで表現
+- Constraintは状態を直接更新せず、判断（Decision）を返す
+- 物理法則・更新ロジック・clampなどはSolverに持たせない（可能な限り）
 """
 
 import torch
 from dataclasses import dataclass, field
-from typing import List, Optional, Callable, Dict, Any
+from typing import List, Optional, Dict, Any
+
+
+# ============================================================
+# データ構造（境界定義に沿った形）
+# ============================================================
+
+@dataclass
+class ForceVector:
+    """
+    Force が表現する「変化の要求」
+    Solverはこの情報を使って状態に適用する。
+    """
+    target: str                 # "residue", "position", "velocity" など
+    value: torch.Tensor
+    priority: float = 1.0
+    source: str = "unknown"
+    mode: str = "add"           # 将来的に add / replace / subtract など
+
+
+@dataclass
+class ConstraintDecision:
+    """
+    Constraint が返す判断
+    Solverはこの判断を基に状態遷移を調整する。
+    """
+    allow: bool = True
+    scale: float = 1.0
+    reject_reason: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class PhaseState:
     """
-    hubCUBE の基本 PhaseState（Phase 1 版）
-
-    将来的には state/PhaseState.py に移動・拡張予定。
+    Phase 1 時点の最小 PhaseState
+    注意: 将来的にはより汎用的な State インターフェースへ移行予定
     """
     position: torch.Tensor
     velocity: torch.Tensor = field(default_factory=lambda: torch.zeros(1))
@@ -30,90 +59,115 @@ class PhaseState:
     residue: torch.Tensor = field(default_factory=lambda: torch.zeros(1))
     carry: float = 0.0
     step: int = 0
-    history: List[float] = field(default_factory=list)
-    waypoint: Optional[torch.Tensor] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SolverResult:
+    """Solverの出力"""
+    new_state: PhaseState
+    applied_forces: List[ForceVector]
+    decisions: List[ConstraintDecision]
+    metrics: Dict[str, float] = field(default_factory=dict)
 
 
 class MinimalDynamicsSolver:
     """
-    最小 Dynamics Solver
+    最小 Dynamics Solver（Integrator）
 
-    役割:
-    - 複数の Force から total_force を合成
-    - Constraint を適用
-    - 新しい PhaseState を生成して返す（唯一の状態更新担当）
+    役割を厳密に限定:
+    - ForceVector と ConstraintDecision を受け取る
+    - 状態遷移を実行して返す（唯一の更新担当）
+    - 特定の状態フィールドの意味や物理法則は知らない
     """
 
-    def __init__(self, residue_cap: float = 3.0):
-        self.residue_cap = residue_cap
+    def __init__(self, default_cap: float = 3.0):
+        # default_cap は一時的な安全装置。将来的には BoundaryConstraint に移譲
+        self.default_cap = default_cap
+
+    def _apply_force_to_state(
+        self, state: PhaseState, force: ForceVector
+    ) -> PhaseState:
+        """
+        ForceVector を状態に適用する（現時点の簡易実装）
+        将来的にはより抽象的な delta 適用機構に置き換える。
+        """
+        new_state = state
+
+        if force.target == "residue":
+            if force.mode == "add":
+                new_residue = state.residue + force.value * force.priority
+            else:
+                new_residue = force.value * force.priority
+
+            # 一時的な安全クランプ（将来的には削除 or BoundaryConstraint に移譲）
+            new_residue = torch.clamp(new_residue, -self.default_cap, self.default_cap)
+            new_state = PhaseState(
+                position=state.position,
+                velocity=state.velocity,
+                energy=state.energy,
+                residue=new_residue,
+                carry=state.carry,
+                step=state.step,
+                metadata=state.metadata.copy(),
+            )
+
+        # 将来的に "position", "velocity" などもここで処理
+        return new_state
 
     def integrate(
         self,
         current_state: PhaseState,
-        forces: List[torch.Tensor],
-        constraints: Optional[List[Callable[[torch.Tensor], torch.Tensor]]] = None,
-    ) -> PhaseState:
+        forces: List[ForceVector],
+        decisions: Optional[List[ConstraintDecision]] = None,
+    ) -> SolverResult:
         """
-        Force と Constraint を統合して次の状態を計算
+        Force と Constraint の判断を基に次の状態を計算する。
 
-        Args:
-            current_state: 現在の PhaseState
-            forces: 各 Force モジュールから返された力のリスト
-            constraints: 制約関数（状態を受け取り、制約適用後の状態を返す）のリスト
-
-        Returns:
-            新しい PhaseState（Solver だけがこれを生成する）
+        このメソッドは「状態遷移の実行」だけを担当する。
+        特定の状態の意味や更新ロジックは知らない。
         """
-        # 1. Force の合成
-        if forces:
-            total_force = torch.stack(forces).sum(dim=0)
-        else:
-            total_force = torch.zeros_like(current_state.residue)
+        decisions = decisions or []
+        applied_forces: List[ForceVector] = []
 
-        # 2. 仮の新 residue を計算（まだ制約前）
-        new_residue = current_state.residue + total_force
+        # 1. Constraint の判断を反映（現時点は簡易 scale）
+        scale = 1.0
+        for d in decisions:
+            if not d.allow:
+                scale = 0.0
+                break
+            scale *= d.scale
 
-        # 3. Constraint の適用（存在する場合）
-        if constraints:
-            for constraint_fn in constraints:
-                new_residue = constraint_fn(new_residue)
+        # 2. Force を順次適用
+        new_state = current_state
+        for f in forces:
+            new_state = self._apply_force_to_state(new_state, f)
+            applied_forces.append(f)
 
-        # 4. 基本的なクランプ（将来的には BoundaryConstraint に移譲）
-        new_residue = torch.clamp(new_residue, -self.residue_cap, self.residue_cap)
-
-        # 5. 簡易 velocity / energy 更新（PhaseState の拡張分）
-        new_velocity = new_residue - current_state.residue
-        new_energy = current_state.energy + float(new_residue.abs().mean()) * 0.1
-
-        # 6. 新しい PhaseState を生成（ここが唯一の状態更新ポイント）
-        new_state = PhaseState(
-            position=current_state.position + new_velocity * 0.5,  # 簡易移動
-            velocity=new_velocity,
-            energy=new_energy,
-            residue=new_residue,
-            carry=current_state.carry * 0.95 + float(new_residue.abs().mean()) * 0.05,
-            step=current_state.step + 1,
-            history=current_state.history + [float(new_residue.abs().mean())],
-            waypoint=current_state.waypoint,
-            metadata=current_state.metadata.copy(),
+        # 3. 結果をまとめる
+        result = SolverResult(
+            new_state=new_state,
+            applied_forces=applied_forces,
+            decisions=decisions,
+            metrics={
+                "residue_norm": float(new_state.residue.abs().mean()),
+            }
         )
 
-        return new_state
+        return result
 
 
 # ============================================================
-# 簡易動作確認用デモ（Phase 1 実験用）
+# 簡易デモ（Phase 1 実験用）
 # ============================================================
 if __name__ == "__main__":
     from forces.CarryForce_v4 import CarryForce
 
-    print("=== MinimalDynamicsSolver v1 Demo ===\n")
+    print("=== MinimalDynamicsSolver v4 Demo ===\n")
 
-    solver = MinimalDynamicsSolver(residue_cap=3.0)
+    solver = MinimalDynamicsSolver(default_cap=3.0)
     carry = CarryForce(default_persistence=0.87)
 
-    # 初期状態
     state = PhaseState(
         position=torch.zeros(5),
         residue=torch.tensor([0.4, -0.2, 0.6, 0.1, -0.3]),
@@ -121,21 +175,25 @@ if __name__ == "__main__":
         step=0,
     )
 
-    for step in range(5):
-        # CarryForce から力を取得
-        carry_force = carry.compute_force(state.residue, persistence=0.88)
+    for _ in range(5):
+        carry_value = carry.compute_force(state.residue, persistence=0.88)
 
-        # Solver に渡して次の状態を得る
-        new_state = solver.integrate(
-            current_state=state,
-            forces=[carry_force],
-            constraints=None,  # Phase 1 ではまだ Constraint なし
+        force_vec = ForceVector(
+            target="residue",
+            value=carry_value,
+            priority=1.0,
+            source="CarryForce",
+            mode="add",
         )
 
-        print(f"Step {new_state.step}:")
-        print(f"  residue_norm = {new_state.residue.abs().mean():.4f}")
-        print(f"  energy       = {new_state.energy:.4f}")
-        print(f"  carry        = {new_state.carry:.4f}")
+        result = solver.integrate(
+            current_state=state,
+            forces=[force_vec],
+            decisions=None,
+        )
+
+        print(f"Step {result.new_state.step}:")
+        print(f"  residue_norm = {result.metrics.get('residue_norm', 0):.4f}")
         print()
 
-        state = new_state
+        state = result.new_state
