@@ -1,199 +1,116 @@
-#!/usr/bin/env python3
-"""
-MinimalDynamicsSolver v4 - hubCUBEの心臓部（責務境界準拠版）
+import numpy as np
+from typing import Optional
 
-このバージョンは docs/architecture/Core_Component_Responsibility_Boundaries.md
-で定義された原則に基づいて再設計されている。
-
-設計原則（厳守）:
-- Solverは状態遷移の「実行（Integrator）」に徹する
-- Solverは特定の状態フィールド（residueなど）の意味を知らない
-- Forceは「どの対象に、どれだけの変化を望むか」をForceVectorで表現
-- Constraintは状態を直接更新せず、判断（Decision）を返す
-- 物理法則・更新ロジック・clampなどはSolverに持たせない（可能な限り）
-"""
-
-import torch
-from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
-
-
-# ============================================================
-# データ構造（境界定義に沿った形）
-# ============================================================
-
-@dataclass
-class ForceVector:
-    """
-    Force が表現する「変化の要求」
-    Solverはこの情報を使って状態に適用する。
-    """
-    target: str                 # "residue", "position", "velocity" など
-    value: torch.Tensor
-    priority: float = 1.0
-    source: str = "unknown"
-    mode: str = "add"           # 将来的に add / replace / subtract など
-
-
-@dataclass
-class ConstraintDecision:
-    """
-    Constraint が返す判断
-    Solverはこの判断を基に状態遷移を調整する。
-    """
-    allow: bool = True
-    scale: float = 1.0
-    reject_reason: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class PhaseState:
-    """
-    Phase 1 時点の最小 PhaseState
-    注意: 将来的にはより汎用的な State インターフェースへ移行予定
-    """
-    position: torch.Tensor
-    velocity: torch.Tensor = field(default_factory=lambda: torch.zeros(1))
-    energy: float = 0.0
-    residue: torch.Tensor = field(default_factory=lambda: torch.zeros(1))
-    carry: float = 0.0
-    step: int = 0
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class SolverResult:
-    """Solverの出力"""
-    new_state: PhaseState
-    applied_forces: List[ForceVector]
-    decisions: List[ConstraintDecision]
-    metrics: Dict[str, float] = field(default_factory=dict)
+try:
+    from state.PhaseState import PhaseState
+    from constraints.ConstraintCore import IntegratorInput
+except ImportError:
+    # Fallback for standalone testing
+    import sys
+    sys.path.append(".")
+    from state.PhaseState import PhaseState
+    from constraints.ConstraintCore import IntegratorInput
 
 
 class MinimalDynamicsSolver:
     """
-    最小 Dynamics Solver（Integrator）
+    hubCUBEの心臓部（Integrator）。
 
-    役割を厳密に限定:
-    - ForceVector と ConstraintDecision を受け取る
-    - 状態遷移を実行して返す（唯一の更新担当）
-    - 特定の状態フィールドの意味や物理法則は知らない
+    責務を嚳密に限定した最小実装:
+    - IntegratorInput（安全なdelta + violations）を受け取る
+    - PhaseStateを直接更新する（唯一の状態更新担当）
+    - 積分（position, velocity）のみを担当
+    - Evaluation層がやるべきこと（energy, stability等）は行わない
     """
-
-    def __init__(self, default_cap: float = 3.0):
-        # default_cap は一時的な安全装置。将来的には BoundaryConstraint に移譲
-        self.default_cap = default_cap
-
-    def _apply_force_to_state(
-        self, state: PhaseState, force: ForceVector
-    ) -> PhaseState:
-        """
-        ForceVector を状態に適用する（現時点の簡易実装）
-        将来的にはより抽象的な delta 適用機構に置き換える。
-        """
-        new_state = state
-
-        if force.target == "residue":
-            if force.mode == "add":
-                new_residue = state.residue + force.value * force.priority
-            else:
-                new_residue = force.value * force.priority
-
-            # 一時的な安全クランプ（将来的には削除 or BoundaryConstraint に移譲）
-            new_residue = torch.clamp(new_residue, -self.default_cap, self.default_cap)
-            new_state = PhaseState(
-                position=state.position,
-                velocity=state.velocity,
-                energy=state.energy,
-                residue=new_residue,
-                carry=state.carry,
-                step=state.step,
-                metadata=state.metadata.copy(),
-            )
-
-        # 将来的に "position", "velocity" などもここで処理
-        return new_state
 
     def integrate(
         self,
-        current_state: PhaseState,
-        forces: List[ForceVector],
-        decisions: Optional[List[ConstraintDecision]] = None,
-    ) -> SolverResult:
+        state: PhaseState,
+        integrator_input: IntegratorInput,
+        dt: float,
+        debug: bool = False
+    ) -> PhaseState:
         """
-        Force と Constraint の判断を基に次の状態を計算する。
+        PhaseStateを更新する。
 
-        このメソッドは「状態遷移の実行」だけを担当する。
-        特定の状態の意味や更新ロジックは知らない。
+        Args:
+            state: 更新対象の PhaseState
+            integrator_input: ConstraintPipelineからの出力（安全化済みdelta + violations）
+            dt: タイムステップ
+            debug: Trueの時のみ validate()を実行（パフォーマンス配慮）
         """
-        decisions = decisions or []
-        applied_forces: List[ForceVector] = []
+        delta = integrator_input.delta
 
-        # 1. Constraint の判断を反映（現時点は簡易 scale）
-        scale = 1.0
-        for d in decisions:
-            if not d.allow:
-                scale = 0.0
-                break
-            scale *= d.scale
+        # 1. 積分（Solverの主な責務）
+        state.field.position = state.field.position + delta
+        state.field.velocity = delta / dt if dt > 0 else np.zeros(3)
 
-        # 2. Force を順次適用
-        new_state = current_state
-        for f in forces:
-            new_state = self._apply_force_to_state(new_state, f)
-            applied_forces.append(f)
+        # 2. 違反情報に基づくステータス更新（最小限）
+        if integrator_input.violations:
+            state.metadata.status = "violated"
+        else:
+            state.metadata.status = "stable"
 
-        # 3. 結果をまとめる
-        result = SolverResult(
-            new_state=new_state,
-            applied_forces=applied_forces,
-            decisions=decisions,
-            metrics={
-                "residue_norm": float(new_state.residue.abs().mean()),
-            }
-        )
+        # 3. 派生キャッシュの更新
+        state.metrics.update_derived_cache(state.field)
 
-        return result
+        # 4. デバッグ時のみ検証（大規模シミュレーションでは重いのでオプション）
+        if debug:
+            is_valid, msg = state.validate()
+            if not is_valid:
+                print(f"[MinimalDynamicsSolver] Validation failed: {msg}")
+
+        return state
 
 
 # ============================================================
-# 簡易デモ（Phase 1 実験用）
+# 簡易テスト（実験用）
 # ============================================================
 if __name__ == "__main__":
-    from forces.CarryForce_v4 import CarryForce
+    print("=== MinimalDynamicsSolver Improved Demo ===\n")
 
-    print("=== MinimalDynamicsSolver v4 Demo ===\n")
-
-    solver = MinimalDynamicsSolver(default_cap=3.0)
-    carry = CarryForce(default_persistence=0.87)
-
-    state = PhaseState(
-        position=torch.zeros(5),
-        residue=torch.tensor([0.4, -0.2, 0.6, 0.1, -0.3]),
-        carry=0.5,
-        step=0,
+    from state.PhaseState import PhysicsField
+    from constraints.ConstraintCore import (
+        ConstraintPipeline, GeometryConstraint, VelocityConstraint,
+        ViolationCollector, ForceOutput, ConstraintContext, ConstraintConfig,
+        SphereGeometry, IntegratorInput
     )
 
-    for _ in range(5):
-        carry_value = carry.compute_force(state.residue, persistence=0.88)
+    # 初期状態
+    initial_field = PhysicsField(
+        position=np.array([2.5, 0.0, 0.0]),
+        velocity=np.array([0.0, 0.0, 0.0])
+    )
+    state = PhaseState(field=initial_field)
 
-        force_vec = ForceVector(
-            target="residue",
-            value=carry_value,
-            priority=1.0,
-            source="CarryForce",
-            mode="add",
-        )
+    # Geometry準備
+    geometries = {"world_boundary": SphereGeometry(radius=3.0)}
+    config = ConstraintConfig(max_speed=5.0, active_geometry_key="world_boundary")
+    context = ConstraintContext(dt=0.1, step=1, config=config, geometries=geometries)
 
-        result = solver.integrate(
-            current_state=state,
-            forces=[force_vec],
-            decisions=None,
-        )
+    # Pipeline
+    pipeline = ConstraintPipeline([GeometryConstraint(), VelocityConstraint()])
 
-        print(f"Step {result.new_state.step}:")
-        print(f"  residue_norm = {result.metrics.get('residue_norm', 0):.4f}")
-        print()
+    # 無茶なForce提案
+    force_proposal = ForceOutput(delta=np.array([4.0, 0.0, 0.0]), source="TestForce")
 
-        state = result.new_state
+    # ConstraintInputに変換
+    input_data = state.to_constraint_input()
+
+    # Pipeline実行
+    collector = ViolationCollector()
+    integrator_input = pipeline.apply_pipeline(input_data, context, force_proposal, collector)
+
+    print(f"Approved delta: {integrator_input.delta}")
+    print(f"Violations    : {len(integrator_input.violations)}\n")
+
+    # Solver実行
+    solver = MinimalDynamicsSolver()
+    updated_state = solver.integrate(state, integrator_input, dt=0.1, debug=True)
+
+    print(f"New Position : {updated_state.field.position}")
+    print(f"New Velocity : {updated_state.field.velocity}")
+    print(f"Status       : {updated_state.metadata.status}")
+    print(f"Energy       : {updated_state.metrics.energy:.2f}")
+
+    print("\n=== Solver Test Completed ===")
